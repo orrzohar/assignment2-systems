@@ -32,8 +32,7 @@ for model_size in "${MODEL_SIZES[@]}"; do
         echo "Profiling model size: $model_size, sequence length: $seq_len"
         echo "=============================================================="
         
-        # 1. Forward pass only (inference)
-        echo "Running forward pass profiling..."
+        # Forward pass only
         nsys profile $NSYS_OPTIONS \
             -o "nsys_profiles/${model_size}_seq${seq_len}_forward" \
             python -m cs336_systems.nsys_benchmarking \
@@ -44,8 +43,7 @@ for model_size in "${MODEL_SIZES[@]}"; do
             --n-measure "$MEASURE_STEPS" \
             --forward-only
             
-        # 2. Forward + backward pass (training without optimizer)
-        echo "Running forward + backward pass profiling..."
+        # Forward + backward pass
         nsys profile $NSYS_OPTIONS \
             -o "nsys_profiles/${model_size}_seq${seq_len}_fwd_bwd" \
             python -m cs336_systems.nsys_benchmarking \
@@ -55,8 +53,7 @@ for model_size in "${MODEL_SIZES[@]}"; do
             --n-warmup "$WARMUP_STEPS" \
             --n-measure "$MEASURE_STEPS"
             
-        # 3. Complete training step (forward + backward + optimizer)
-        echo "Running complete training step profiling..."
+        # Complete training step
         nsys profile $NSYS_OPTIONS \
             -o "nsys_profiles/${model_size}_seq${seq_len}_full_training" \
             python -m cs336_systems.nsys_benchmarking \
@@ -73,7 +70,7 @@ for model_size in "${MODEL_SIZES[@]}"; do
 done
 
 echo "Profiling completed. Results are in the nsys_profiles directory."
-echo "You can view the results using NVIDIA Nsight Systems desktop application."
+echo "View results using NVIDIA Nsight Systems desktop application."
 echo ""
 echo "For each configuration, you'll find three profile files:"
 echo "  - *_forward: Forward pass only (inference)"

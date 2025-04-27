@@ -28,11 +28,10 @@ print("Using annotated attention function for profiling")
 
 # Configuration
 VOCAB_SIZE = 10_000
-if torch.cuda.is_available():
-    DEVICE = "cuda"
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+if DEVICE == "cuda":
     print(f"Using device: {DEVICE} ({torch.cuda.get_device_name(0)})")
 else:
-    DEVICE = "cpu"
     print(f"Warning: CUDA is not available. Using CPU instead.")
     print("Profiling with nsys requires a CUDA-capable GPU.")
 
