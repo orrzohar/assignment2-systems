@@ -8,7 +8,7 @@ mkdir -p nsys_profiles
 
 # Model sizes to test (from Table 1 in the assignment)
 # Comment out larger models if you're running out of memory
-MODEL_SIZES=("small" "medium" "large" "xl" "2.7B")
+MODEL_SIZES=( "medium" )
 
 # Sequence lengths to test
 SEQ_LENGTHS=(128 256 512 1024)

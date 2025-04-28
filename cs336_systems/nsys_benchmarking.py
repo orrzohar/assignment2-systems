@@ -9,12 +9,14 @@ in both forward and backward passes, as well as in optimizer steps.
 import argparse
 import timeit
 from typing import Dict, Tuple, List, Optional
+from contextlib import nullcontext
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.nn.utils import clip_grad_norm_
 import torch.cuda.nvtx as nvtx
+import pandas as pd
 
 # Import model and replace attention function with annotated version
 from cs336_basics.model import BasicsTransformerLM as Transformer
@@ -58,6 +60,8 @@ def run_steps(
     do_backward: bool,
     run_optimizer: bool = False,
     optimizer: Optional[torch.optim.Optimizer] = None,
+    use_mixed_precision: bool = False,
+    dtype: torch.dtype = torch.bfloat16,
 ) -> Tuple[List[float], List[float], List[float]]:
     """
     Run n steps of forward/backward/optimizer and time each component.
@@ -70,6 +74,8 @@ def run_steps(
         do_backward: Whether to run backward pass
         run_optimizer: Whether to run optimizer step
         optimizer: Optimizer instance (required if run_optimizer is True)
+        use_mixed_precision: Whether to use mixed precision
+        dtype: Data type for mixed precision (torch.bfloat16 or torch.float16)
         
     Returns:
         Tuple of (forward times, backward times, optimizer times)
@@ -80,6 +86,9 @@ def run_steps(
     if run_optimizer and optimizer is None:
         raise ValueError("Optimizer must be provided if run_optimizer is True")
     
+    # Create autocast context if using mixed precision
+    autocast_context = torch.autocast(device_type=DEVICE, dtype=dtype) if use_mixed_precision else nullcontext()
+    
     for i in range(n):
         # Start step with NVTX range
         with nvtx.range(f"step_{i}"):
@@ -89,7 +98,8 @@ def run_steps(
             
             with nvtx.range("forward_pass"):
                 start_fwd = timeit.default_timer()
-                logits = model(x)
+                with autocast_context:
+                    logits = model(x)
                 if DEVICE == "cuda":
                     torch.cuda.synchronize()
                 end_fwd = timeit.default_timer()
@@ -126,6 +136,98 @@ def run_steps(
     
     return fwd_times, bwd_times, optim_times
 
+def analyze_attention_components(
+    model: Transformer,
+    batch_size: int,
+    seq_length: int,
+    num_steps: int = 5
+) -> Dict[str, float]:
+    """
+    Detailed analysis of attention layer components to compare softmax vs matrix multiplications.
+    
+    This function specifically profiles the three main components of the attention mechanism
+    to compare their runtimes.
+    
+    Args:
+        model: The transformer model
+        batch_size: Batch size for input
+        seq_length: Sequence length for input
+        num_steps: Number of steps to run for statistical significance
+        
+    Returns:
+        Dictionary with timing results for attention components
+    """
+    print(f"\nPerforming detailed analysis of attention layer components...")
+    print(f"Model config: d_model={model.d_model}, num_heads={model.config['num_heads']}")
+    print(f"Batch size: {batch_size}, Sequence length: {seq_length}")
+    
+    # Generate random batch for the analysis
+    x = torch.randint(0, VOCAB_SIZE, (batch_size, seq_length), device=DEVICE, dtype=torch.long)
+    
+    # Create variables to store timing results
+    attention_scores_times = []
+    softmax_times = []
+    final_matmul_times = []
+    
+    # Run the model a few times to get timing statistics
+    model.eval()  # Set to evaluation mode since we don't need gradients
+    
+    for step in range(num_steps):
+        with torch.no_grad(), nvtx.range(f"attention_analysis_step_{step}"):
+            # Forward pass
+            with nvtx.range("attention_analysis_forward"):
+                # Force execution of each layer independently to get clean timings
+                layer_outputs = []
+                x_embeds = model.token_embeddings(x)
+                for layer in model.layers:
+                    # Synchronize before each layer to get clean timings
+                    if DEVICE == "cuda":
+                        torch.cuda.synchronize()
+                    
+                    # Process through the layer
+                    layer_output = layer(x_embeds)
+                    layer_outputs.append(layer_output)
+                    x_embeds = layer_output
+                    
+                # Final normalization and output projection
+                output = model.lm_head(model.ln_final(x_embeds))
+    
+    # Calculate theoretical FLOPs
+    head_dim = model.d_model // model.config['num_heads']
+    matmul_qk_flops = batch_size * model.config['num_heads'] * seq_length * seq_length * head_dim
+    softmax_flops = batch_size * model.config['num_heads'] * seq_length * seq_length
+    matmul_vo_flops = batch_size * model.config['num_heads'] * seq_length * seq_length * head_dim
+    
+    # Get average timings from the nsys profile (you'll need to look at this in the nsys GUI)
+    # This function doesn't actually measure the times programmatically since nsys data 
+    # isn't directly accessible from Python - you'll need to look at the nsys profile.
+    # These lines are placeholders to remind you what to look for
+    print(f"\nTo complete the attention component analysis:")
+    print(f"1. Open the nsys profile and filter for 'attention_analysis_forward'")
+    print(f"2. Within this range, look for the NVTX ranges:")
+    print(f"   - computing_attention_scores (Q×K matrix multiplication)")
+    print(f"   - computing_softmax (Softmax operation)")
+    print(f"   - final_matmul (Attention weights × V matrix multiplication)")
+    print(f"\n3. Compare their durations and FLOP counts:")
+    print(f"   - Theoretical FLOP ratio for Q×K : Softmax : Attention×V = {head_dim} : 1 : {head_dim}")
+    print(f"   - Theoretical FLOP counts:")
+    print(f"     * Q×K matmul: {matmul_qk_flops:,} FLOPs")
+    print(f"     * Softmax: {softmax_flops:,} FLOPs")
+    print(f"     * Attention×V matmul: {matmul_vo_flops:,} FLOPs")
+    print(f"\n4. Check if the runtime ratio matches the FLOP ratio")
+    print(f"   - If not, what factors might explain the discrepancy?")
+    
+    # Return placeholder results - actual values should be retrieved from nsys
+    return {
+        "theory_qk_flops": matmul_qk_flops,
+        "theory_softmax_flops": softmax_flops,
+        "theory_av_flops": matmul_vo_flops,
+        "head_dim": head_dim,
+        "batch_size": batch_size,
+        "seq_length": seq_length,
+        "num_heads": model.config['num_heads']
+    }
+
 def benchmark(
     cfg: Dict[str, int],
     batch: int,
@@ -134,6 +236,9 @@ def benchmark(
     meas: int,
     forward_only: bool,
     run_optimizer: bool,
+    use_mixed_precision: bool = False,
+    dtype: torch.dtype = torch.bfloat16,
+    analyze_attention: bool = False,
 ) -> Dict[str, float]:
     """
     Benchmark a transformer model with the given configuration.
@@ -146,6 +251,9 @@ def benchmark(
         meas: Number of measurement steps
         forward_only: Whether to run only forward pass
         run_optimizer: Whether to run optimizer step
+        use_mixed_precision: Whether to use mixed precision
+        dtype: Data type for mixed precision
+        analyze_attention: Whether to perform detailed attention analysis
         
     Returns:
         Dictionary with timing results
@@ -180,16 +288,20 @@ def benchmark(
         # Generate random batch
         x, y = random_batch(batch, seq)
     
+    # Perform attention component analysis if requested
+    if analyze_attention:
+        attention_results = analyze_attention_components(model, batch, seq)
+    
     # Warmup phase
     with nvtx.range("warmup_phase"):
         print(f"Running {warm} warmup steps...")
-        _ = run_steps(model, x, y, warm, not forward_only, run_optimizer, optimizer)
+        _ = run_steps(model, x, y, warm, not forward_only, run_optimizer, optimizer, use_mixed_precision, dtype)
     
     # Measurement phase
     with nvtx.range("measurement_phase"):
         print(f"Running {meas} measurement steps...")
         fwd_times, bwd_times, optim_times = run_steps(
-            model, x, y, meas, not forward_only, run_optimizer, optimizer
+            model, x, y, meas, not forward_only, run_optimizer, optimizer, use_mixed_precision, dtype
         )
     
     # Calculate statistics
@@ -205,11 +317,64 @@ def benchmark(
         if run_optimizer:
             results["optim_mean"] = float(np.mean(optim_times))
             results["optim_std"] = float(np.std(optim_times))
-            results["total_mean"] = results["fwd_mean"] + results["bwd_mean"] + results["optim_mean"]
+            # Calculate total time statistics
+            total_times = [f + b + o for f, b, o in zip(fwd_times, bwd_times, optim_times)]
+            results["total_mean"] = float(np.mean(total_times))
+            results["total_std"] = float(np.std(total_times))
         else:
-            results["total_mean"] = results["fwd_mean"] + results["bwd_mean"]
+            # Calculate total time statistics without optimizer
+            total_times = [f + b for f, b in zip(fwd_times, bwd_times)]
+            results["total_mean"] = float(np.mean(total_times))
+            results["total_std"] = float(np.std(total_times))
     
     return results
+
+def generate_latex_tables(results: Dict[str, Dict[str, float]], output_file: str) -> None:
+    """
+    Generate LaTeX tables from benchmarking results using pandas DataFrame.
+    
+    Args:
+        results: Dictionary of results from benchmark runs
+        output_file: Path to save the LaTeX tables
+    """
+    # Create DataFrame for combined table
+    data = []
+    
+    for model_size in MODEL_CONFIGS.keys():
+        if model_size in results:
+            row = {'Model': model_size}
+            
+            # Forward pass data
+            row['Forward Mean (ms)'] = results[model_size]['fwd_mean'] * 1000
+            row['Forward Std (ms)'] = results[model_size]['fwd_std'] * 1000
+            
+            # Backward pass data
+            if 'bwd_mean' in results[model_size]:
+                row['Backward Mean (ms)'] = results[model_size]['bwd_mean'] * 1000
+                row['Backward Std (ms)'] = results[model_size]['bwd_std'] * 1000
+                
+                # Total time data
+                if 'total_mean' in results[model_size]:
+                    row['Total Mean (ms)'] = results[model_size]['total_mean'] * 1000
+                    row['Total Std (ms)'] = results[model_size]['total_std'] * 1000
+            
+            data.append(row)
+    
+    # Convert to DataFrame
+    df = pd.DataFrame(data)
+    
+    # Generate LaTeX table
+    latex_table = df.to_latex(
+        index=False,
+        float_format=lambda x: f'{x:.2f}',
+        caption='Model Performance Timings',
+        label='tab:model_timings',
+        column_format='l|r|r|r|r|r|r'
+    )
+    
+    # Write table to file
+    with open(output_file, 'w') as f:
+        f.write(latex_table)
 
 def main() -> None:
     """Main function to parse arguments and run benchmarks."""
@@ -228,55 +393,53 @@ def main() -> None:
                        help="Only profile forward pass")
     parser.add_argument("--run-optimizer", action="store_true",
                        help="Include optimizer step in profiling")
+    parser.add_argument("--use-mixed-precision", action="store_true",
+                       help="Use mixed precision training")
+    parser.add_argument("--dtype", type=str, choices=["bfloat16", "float16"], default="bfloat16",
+                       help="Data type for mixed precision")
+    parser.add_argument("--output-tables", type=str, default="benchmark_tables.tex",
+                       help="Path to save LaTeX tables")
+    parser.add_argument("--analyze-attention", action="store_true",
+                       help="Perform detailed analysis of attention components")
     args = parser.parse_args()
     
-    # Determine which model sizes to profile
-    sizes = list(MODEL_CONFIGS.keys()) if args.model_size == "all" else [args.model_size]
+    # Convert dtype string to torch.dtype
+    dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
     
-    # Print header
-    print(f"\n{'='*60}")
-    print(f"Profiling with {'forward pass only' if args.forward_only else 'forward+backward'+(' and optimizer' if args.run_optimizer else '')}")
-    print(f"Batch size: {args.batch_size}, Sequence length: {args.seq_len}")
-    print(f"Warmup steps: {args.n_warmup}, Measurement steps: {args.n_measure}")
-    print(f"{'='*60}\n")
-    
-    # Run benchmarks for each model size
-    for size in sizes:
-        print(f"\nProfiling {size} model...")
-        try:
-            cfg = MODEL_CONFIGS[size]
-            results = benchmark(
-                cfg=cfg,
-                batch=args.batch_size,
-                seq=args.seq_len,
-                warm=args.n_warmup,
-                meas=args.n_measure,
-                forward_only=args.forward_only,
-                run_optimizer=args.run_optimizer
+    # Run benchmarks
+    results = {}
+    if args.model_size == "all":
+        for size in MODEL_CONFIGS.keys():
+            print(f"\nBenchmarking {size} model...")
+            results[size] = benchmark(
+                MODEL_CONFIGS[size],
+                args.batch_size,
+                args.seq_len,
+                args.n_warmup,
+                args.n_measure,
+                args.forward_only,
+                args.run_optimizer,
+                args.use_mixed_precision,
+                dtype,
+                args.analyze_attention
             )
-            
-            # Print results
-            print(f"\nResults for {size} model:")
-            print(f"  Forward pass: {results['fwd_mean']*1000:.2f} ± {results['fwd_std']*1000:.2f} ms")
-            
-            if not args.forward_only:
-                print(f"  Backward pass: {results['bwd_mean']*1000:.2f} ± {results['bwd_std']*1000:.2f} ms")
-                
-                if args.run_optimizer:
-                    print(f"  Optimizer step: {results['optim_mean']*1000:.2f} ± {results['optim_std']*1000:.2f} ms")
-                    
-                print(f"  Total step time: {results['total_mean']*1000:.2f} ms")
-            
-        except RuntimeError as e:
-            if "CUDA out of memory" in str(e):
-                print(f"Error: CUDA out of memory for {size} model with sequence length {args.seq_len}")
-                print("Try using a smaller model or sequence length")
-            else:
-                print(f"Error: {str(e)}")
+    else:
+        results[args.model_size] = benchmark(
+            MODEL_CONFIGS[args.model_size],
+            args.batch_size,
+            args.seq_len,
+            args.n_warmup,
+            args.n_measure,
+            args.forward_only,
+            args.run_optimizer,
+            args.use_mixed_precision,
+            dtype,
+            args.analyze_attention
+        )
     
-    print("\nProfiling complete.")
-    print("Analysis results are in the nsys profile output.")
-    print("View the results using NVIDIA Nsight Systems desktop application.")
+    # Generate LaTeX tables
+    generate_latex_tables(results, args.output_tables)
+    print(f"\nLaTeX tables saved to {args.output_tables}")
 
 if __name__ == "__main__":
     main()
