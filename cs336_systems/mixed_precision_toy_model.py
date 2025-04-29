@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.amp as amp
+import argparse
 
 class ToyModel(nn.Module):
     def __init__(self, in_features: int, out_features: int):
@@ -19,7 +20,7 @@ class ToyModel(nn.Module):
 def print_tensor_info(name, tensor):
     print(f"{name}: dtype={tensor.dtype}, shape={tensor.shape}")
 
-def test_mixed_precision():
+def test_mixed_precision(precision: str):
     # Create model and move to GPU
     model = ToyModel(5, 3).cuda()
     
@@ -30,10 +31,13 @@ def test_mixed_precision():
     # Create loss function
     criterion = nn.CrossEntropyLoss()
     
+    # Set the appropriate dtype based on the precision flag
+    dtype = torch.bfloat16 if precision == "bfloat16" else torch.float16
+    
     # Enable mixed precision
-    with amp.autocast('cuda', dtype=torch.float16):
+    with amp.autocast('cuda', dtype=dtype):
         # Forward pass
-        print("\nDuring forward pass:")
+        print(f"\nDuring forward pass (using {precision}):")
         print_tensor_info("Model parameters (fc1.weight)", model.fc1.weight)
         
         x1 = model.fc1(x)
@@ -55,4 +59,9 @@ def test_mixed_precision():
         print_tensor_info("Gradient of fc2.weight", model.fc2.weight.grad)
 
 if __name__ == "__main__":
-    test_mixed_precision() 
+    parser = argparse.ArgumentParser(description='Test mixed precision training')
+    parser.add_argument('--precision', type=str, choices=['float16', 'bfloat16'], 
+                      default='float16', help='Precision to use for mixed precision training')
+    args = parser.parse_args()
+    
+    test_mixed_precision(args.precision) 
