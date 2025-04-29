@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-import torch.cuda.amp as amp
+import torch.amp as amp
 
 class ToyModel(nn.Module):
     def __init__(self, in_features: int, out_features: int):
@@ -31,7 +31,7 @@ def test_mixed_precision():
     criterion = nn.CrossEntropyLoss()
     
     # Enable mixed precision
-    with amp.autocast(device_type='cuda', dtype=torch.float16):
+    with amp.autocast('cuda', dtype=torch.float16):
         # Forward pass
         print("\nDuring forward pass:")
         print_tensor_info("Model parameters (fc1.weight)", model.fc1.weight)
