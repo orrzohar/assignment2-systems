@@ -75,6 +75,9 @@ def benchmark_attention(
     # Time backward passes
     backward_times = []
     for _ in range(num_steps):
+        # Create new output for each backward pass
+        output = attention(Q, K, V)
+        
         start = timeit.default_timer()
         output.sum().backward()
         torch.cuda.synchronize()
