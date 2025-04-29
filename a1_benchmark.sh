@@ -29,8 +29,7 @@ python "$PYTHON_SCRIPT" \
     --batch-size $BATCH_SIZE \
     --seq-len $SEQ_LEN \
     --n-warmup $N_WARMUP_B \
-    --n-measure $N_MEASURE \
-    --output-tables "$OUTPUT_DIR/tables_warmup_${N_WARMUP_B}.tex"
+    --n-measure $N_MEASURE
 
 if [ $? -ne 0 ]; then
     echo "Error running experiment (b). Exiting."
@@ -51,8 +50,7 @@ for n_warmup_c in 0 1 2; do
         --batch-size $BATCH_SIZE \
         --seq-len $SEQ_LEN \
         --n-warmup $n_warmup_c \
-        --n-measure $N_MEASURE \
-        --output-tables "$OUTPUT_DIR/tables_warmup_${n_warmup_c}.tex"
+        --n-measure $N_MEASURE
 
     if [ $? -ne 0 ]; then
         echo "Error running experiment (c) with $n_warmup_c warmup steps. Continuing..."
@@ -63,6 +61,5 @@ for n_warmup_c in 0 1 2; do
 done
 
 echo "--- All Benchmarking Runs Complete ---"
-echo "LaTeX tables have been generated in the $OUTPUT_DIR directory"
 
 exit 0
