@@ -139,6 +139,7 @@ def benchmark(
     run_optimizer: bool,
     profile_memory: bool = False,
     mixed_precision: bool = False,
+    compiled: bool = False,
 ) -> Dict[str, float]:
     """
     Benchmark a transformer model with the given configuration.
@@ -153,6 +154,7 @@ def benchmark(
         run_optimizer: Whether to run optimizer step
         profile_memory: Whether to profile memory usage
         mixed_precision: Whether to use mixed precision training
+        compiled: Whether to use compiled version
         
     Returns:
         Dictionary with timing results
@@ -170,6 +172,10 @@ def benchmark(
             rope_theta=10000.0,
             **cfg
         ).to(DEVICE)
+        
+        if compiled:
+            model = torch.compile(model)
+            print("Using compiled model")
         
         model.train(not forward_only)
         
@@ -258,6 +264,8 @@ def main() -> None:
                        help="Profile memory usage and save snapshot")
     parser.add_argument("--mixed-precision", action="store_true",
                        help="Use mixed precision training")
+    parser.add_argument("--compiled", action="store_true",
+                       help="Use compiled model")
     args = parser.parse_args()
     
     # Determine which model sizes to profile
@@ -286,7 +294,8 @@ def main() -> None:
                 forward_only=args.forward_only,
                 run_optimizer=args.run_optimizer,
                 profile_memory=args.profile_memory,
-                mixed_precision=args.mixed_precision
+                mixed_precision=args.mixed_precision,
+                compiled=args.compiled
             )
             
             # Print results
