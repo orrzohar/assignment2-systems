@@ -2,31 +2,16 @@
 """
 Memory profiling for Transformer models
 
-This script profiles memory usage of transformer models during forward pass,
-backward pass, and optimizer steps using PyTorch's memory profiler.
+This script profiles memory usage of Transformer models during various stages
+of training and inference using PyTorch's memory profiler.
 """
 import argparse
-import timeit
-import pickle
-from typing import Dict, Tuple, List, Optional
-from contextlib import nullcontext
-
-import numpy as np
+import os
+from typing import Optional
 import torch
-import torch.nn.functional as F
-from torch.nn.utils import clip_grad_norm_
-import torch.cuda.nvtx as nvtx
-import pandas as pd
-
-# Import model and replace attention function with annotated version
+from torch.profiler import profile, ProfilerActivity
 from cs336_basics.model import BasicsTransformerLM as Transformer
 from cs336_basics.optimizer import AdamW
-from cs336_systems.model_annotated import annotated_scaled_dot_product_attention
-
-# Replace the original attention function with the annotated version
-from cs336_basics import model as basics_model
-basics_model.scaled_dot_product_attention = annotated_scaled_dot_product_attention
-print("Using annotated attention function for profiling")
 
 # Configuration
 VOCAB_SIZE = 10_000
@@ -38,7 +23,7 @@ else:
     print("Memory profiling requires a CUDA-capable GPU.")
 
 # Model configurations based on Table 1 in the assignment
-MODEL_CONFIGS: Dict[str, Dict[str, int]] = {
+MODEL_CONFIGS = {
     "small":  {"d_model": 768,  "d_ff": 3072,  "num_layers": 12, "num_heads": 12},
     "medium": {"d_model": 1024, "d_ff": 4096,  "num_layers": 24, "num_heads": 16},
     "large":  {"d_model": 1280, "d_ff": 5120,  "num_layers": 36, "num_heads": 20},
@@ -46,143 +31,143 @@ MODEL_CONFIGS: Dict[str, Dict[str, int]] = {
     "2.7B":   {"d_model": 2560, "d_ff": 10240, "num_layers": 32, "num_heads": 32},
 }
 
-def random_batch(batch: int, seq: int) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Generate random batches of token IDs for input and target."""
-    x = torch.randint(0, VOCAB_SIZE, (batch, seq), device=DEVICE, dtype=torch.long)
-    y = torch.randint(0, VOCAB_SIZE, (batch, seq), device=DEVICE, dtype=torch.long)
-    return x, y
-
 def run_memory_profiling(
-    model: Transformer,
-    x: torch.Tensor,
-    y: torch.Tensor,
-    do_backward: bool,
-    run_optimizer: bool = False,
-    optimizer: Optional[torch.optim.Optimizer] = None,
+    model_size: str,
+    seq_len: int,
+    batch_size: int,
+    output_dir: str,
+    forward_only: bool = False,
     use_mixed_precision: bool = False,
     dtype: torch.dtype = torch.bfloat16,
-    output_file: str = "memory_snapshot.pickle"
 ) -> None:
     """
-    Run memory profiling for a single step.
+    Run memory profiling for a Transformer model.
     
     Args:
-        model: The transformer model
-        x: Input tokens
-        y: Target tokens
-        do_backward: Whether to run backward pass
-        run_optimizer: Whether to run optimizer step
-        optimizer: Optimizer instance (required if run_optimizer is True)
+        model_size: Size of model to profile
+        seq_len: Sequence length
+        batch_size: Batch size
+        output_dir: Directory to save profiling results
+        forward_only: Whether to profile only forward pass
         use_mixed_precision: Whether to use mixed precision
         dtype: Data type for mixed precision
-        output_file: Path to save memory snapshot
     """
-    criterion = torch.nn.CrossEntropyLoss()
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
     
-    if run_optimizer and optimizer is None:
-        raise ValueError("Optimizer must be provided if run_optimizer is True")
+    # Initialize model
+    model = Transformer(
+        vocab_size=VOCAB_SIZE,
+        context_length=seq_len,
+        rope_theta=10000.0,
+        **MODEL_CONFIGS[model_size]
+    ).to(DEVICE)
+    
+    model.train(not forward_only)
+    
+    # Create optimizer if needed
+    optimizer = None
+    if not forward_only:
+        optimizer = AdamW(
+            model.parameters(),
+            lr=1e-4,
+            weight_decay=0.01,
+            betas=(0.9, 0.95)
+        )
+    
+    # Create random batch
+    x = torch.randint(0, VOCAB_SIZE, (batch_size, seq_len), device=DEVICE, dtype=torch.long)
+    y = torch.randint(0, VOCAB_SIZE, (batch_size, seq_len), device=DEVICE, dtype=torch.long)
     
     # Create autocast context if using mixed precision
-    autocast_context = torch.autocast('cuda', dtype=dtype) if use_mixed_precision else nullcontext()
+    autocast_context = torch.autocast(device_type=DEVICE, dtype=dtype) if use_mixed_precision else torch.cuda.amp.autocast(enabled=False)
     
     # Start recording memory history
     torch.cuda.memory._record_memory_history(max_entries=1000000)
     
-    try:
+    # Run profiling
+    with profile(
+        activities=[
+            ProfilerActivity.CPU,
+            ProfilerActivity.CUDA,
+        ],
+        schedule=torch.profiler.schedule(wait=0, warmup=0, active=1, repeat=1),
+        experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True),
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True,
+    ) as prof:
         # Forward pass
-        with nvtx.range("forward_pass"):
-            with autocast_context:
-                logits = model(x)
-            loss = criterion(
+        with autocast_context:
+            logits = model(x)
+        
+        if not forward_only:
+            # Backward pass
+            loss = torch.nn.functional.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 y.view(-1)
             )
-        
-        # Backward pass
-        if do_backward:
-            with nvtx.range("backward_pass"):
-                loss.backward()
+            loss.backward()
             
             # Optimizer step
-            if run_optimizer and optimizer:
-                with nvtx.range("optimizer_step"):
-                    optimizer.step()
-                    optimizer.zero_grad(set_to_none=True)
-            else:
-                model.zero_grad(set_to_none=True)
+            if optimizer:
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
         
-        # Save memory snapshot
-        torch.cuda.memory._dump_snapshot(output_file)
-        print(f"Memory snapshot saved to {output_file}")
-        
-    finally:
-        # Stop recording history
-        torch.cuda.memory._record_memory_history(enabled=None)
+        prof.step()
+    
+    # Save profiling results
+    prefix = f"{model_size}_seq{seq_len}_batch{batch_size}"
+    if forward_only:
+        prefix += "_forward"
+    else:
+        prefix += "_full"
+    if use_mixed_precision:
+        prefix += f"_{dtype}"
+    
+    # Save memory timeline
+    prof.export_memory_timeline(f"{output_dir}/{prefix}_timeline.html", device=DEVICE)
+    
+    # Save memory snapshot
+    torch.cuda.memory._dump_snapshot(f"{output_dir}/{prefix}_snapshot.pickle")
+    
+    # Stop recording history
+    torch.cuda.memory._record_memory_history(enabled=None)
+    
+    print(f"Memory profiling completed. Results saved to {output_dir}/")
+    print(f"- Timeline: {prefix}_timeline.html")
+    print(f"- Snapshot: {prefix}_snapshot.pickle")
 
 def main() -> None:
     """Main function to parse arguments and run memory profiling."""
     parser = argparse.ArgumentParser(description="Profile memory usage of Transformer models")
-    parser.add_argument("--model-size", type=str, choices=list(MODEL_CONFIGS.keys()), required=True,
+    parser.add_argument("--model-size", type=str, choices=list(MODEL_CONFIGS.keys()), default="2.7B",
                        help="Model size to profile")
-    parser.add_argument("--seq-len", type=int, required=True,
+    parser.add_argument("--seq-len", type=int, default=128,
                        help="Sequence length to use")
     parser.add_argument("--batch-size", type=int, default=4,
                        help="Batch size to use")
+    parser.add_argument("--output-dir", type=str, default="memory_profiles",
+                       help="Directory to save profiling results")
     parser.add_argument("--forward-only", action="store_true",
                        help="Only profile forward pass")
-    parser.add_argument("--run-optimizer", action="store_true",
-                       help="Include optimizer step in profiling")
     parser.add_argument("--use-mixed-precision", action="store_true",
                        help="Use mixed precision training")
     parser.add_argument("--dtype", type=str, choices=["bfloat16", "float16"], default="bfloat16",
                        help="Data type for mixed precision")
-    parser.add_argument("--output-file", type=str, default="memory_snapshot.pickle",
-                       help="Path to save memory snapshot")
     args = parser.parse_args()
     
     # Convert dtype string to torch.dtype
     dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
     
-    # Set random seed for reproducibility
-    torch.manual_seed(42)
-    if DEVICE == "cuda":
-        torch.cuda.manual_seed_all(42)
-    
-    # Initialize model
-    model = Transformer(
-        vocab_size=VOCAB_SIZE,
-        context_length=args.seq_len,
-        rope_theta=10000.0,
-        **MODEL_CONFIGS[args.model_size]
-    ).to(DEVICE)
-    
-    model.train(not args.forward_only)
-    
-    # Create optimizer if needed
-    optimizer = None
-    if not args.forward_only and args.run_optimizer:
-        optimizer = AdamW(
-            model.parameters(), 
-            lr=1e-4,
-            weight_decay=0.01,
-            betas=(0.9, 0.95)
-        )
-        print("Created AdamW optimizer")
-    
-    # Generate random batch
-    x, y = random_batch(args.batch_size, args.seq_len)
-    
-    # Run memory profiling
     run_memory_profiling(
-        model,
-        x,
-        y,
-        not args.forward_only,
-        args.run_optimizer,
-        optimizer,
-        args.use_mixed_precision,
-        dtype,
-        args.output_file
+        model_size=args.model_size,
+        seq_len=args.seq_len,
+        batch_size=args.batch_size,
+        output_dir=args.output_dir,
+        forward_only=args.forward_only,
+        use_mixed_precision=args.use_mixed_precision,
+        dtype=dtype
     )
 
 if __name__ == "__main__":
