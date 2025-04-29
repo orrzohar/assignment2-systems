@@ -14,8 +14,6 @@ from contextlib import nullcontext
 
 import numpy as np
 import torch
-import torch.nn.functional as F
-from torch.nn.utils import clip_grad_norm_
 import torch.cuda.nvtx as nvtx
 
 # Import model and replace attention function with annotated version
@@ -199,7 +197,11 @@ def benchmark(
             model = torch.compile(model)
             print("Using compiled model")
         
-        model.train(not forward_only)
+        # Set model to eval mode for forward-only passes
+        if forward_only:
+            model.eval()
+        else:
+            model.train()
         
         # Create optimizer if needed
         optimizer = None
@@ -215,6 +217,11 @@ def benchmark(
         # Generate random batch
         x, y = random_batch(batch, seq)
     
+    # Start memory profiling if requested - moved before warmup
+    if profile_memory and DEVICE == "cuda":
+        print("Starting memory profiling...")
+        torch.cuda.memory._record_memory_history(max_entries=1000000)
+    
     # Warmup phase
     with nvtx.range("warmup_phase"):
         print(f"Running {warm} warmup steps...")
@@ -222,11 +229,6 @@ def benchmark(
             model, x, y, warm, not forward_only, run_optimizer, optimizer,
             mixed_precision=mixed_precision
         )
-    
-    # Start memory profiling if requested
-    if profile_memory and DEVICE == "cuda":
-        print("Starting memory profiling...")
-        torch.cuda.memory._record_memory_history(max_entries=1000000)
     
     # Measurement phase
     with nvtx.range("measurement_phase"):
