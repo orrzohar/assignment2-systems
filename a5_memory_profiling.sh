@@ -1,63 +1,94 @@
 #!/bin/bash
 
-# Script to run memory profiling experiments
+# Script to run memory profiling experiments for CS336 Assignment 2, Section 1.1.6
 
-echo "Starting memory profiling..."
+echo "Starting memory profiling script..."
 
-# Create output directory
-mkdir -p memory_profiles
+# --- Configuration ---
+PYTHON_SCRIPT="cs336_systems/nsys_benchmarking.py"
+BATCH_SIZE=4
+N_WARMUP=5
+N_MEASURE=3
+OUTPUT_DIR="memory_snapshots"
 
-# Model size to test (2.7B as specified in the problem)
-MODEL_SIZE="2.7B"
+# Create output directory if it doesn't exist
+mkdir -p "$OUTPUT_DIR"
 
-# Sequence lengths to test
+# Check if the python script exists
+if [ ! -f "$PYTHON_SCRIPT" ]; then
+    echo "Error: Benchmarking script '$PYTHON_SCRIPT' not found."
+    exit 1
+fi
+
+# --- Task (a): Profile 2.7B model with different context lengths ---
+echo "--- Running Task (a): Profile 2.7B model with different context lengths ---"
+
+# Context lengths to test
 SEQ_LENGTHS=(128 256 512)
 
-# Batch size
-BATCH_SIZE=4
-
-# Run profiling for each sequence length
+# Forward pass only
+echo "Profiling forward pass only..."
 for seq_len in "${SEQ_LENGTHS[@]}"; do
-    echo "=============================================================="
-    echo "Profiling sequence length: $seq_len"
-    echo "=============================================================="
-    
-    # Forward pass only
-    echo "Running forward pass only..."
-    python -m cs336_systems.memory_profiling \
-        --model-size "$MODEL_SIZE" \
-        --seq-len "$seq_len" \
-        --batch-size "$BATCH_SIZE" \
+    echo "Running with sequence length: $seq_len"
+    python "$PYTHON_SCRIPT" \
+        --model-size 2.7B \
+        --batch-size $BATCH_SIZE \
+        --seq-len $seq_len \
+        --n-warmup $N_WARMUP \
+        --n-measure $N_MEASURE \
         --forward-only \
-        --output-file "memory_profiles/2.7B_seq${seq_len}_forward.pickle"
-    
-    # Full training step
-    echo "Running full training step..."
-    python -m cs336_systems.memory_profiling \
-        --model-size "$MODEL_SIZE" \
-        --seq-len "$seq_len" \
-        --batch-size "$BATCH_SIZE" \
-        --run-optimizer \
-        --output-file "memory_profiles/2.7B_seq${seq_len}_full_training.pickle"
-    
-    # Mixed precision (BF16)
-    echo "Running mixed precision (BF16)..."
-    python -m cs336_systems.memory_profiling \
-        --model-size "$MODEL_SIZE" \
-        --seq-len "$seq_len" \
-        --batch-size "$BATCH_SIZE" \
-        --use-mixed-precision \
-        --dtype bfloat16 \
-        --run-optimizer \
-        --output-file "memory_profiles/2.7B_seq${seq_len}_bf16.pickle"
-    
-    echo "Completed profiling for sequence length: $seq_len"
-    echo ""
+        --profile-memory
 done
 
-echo "Memory profiling completed. Results are in the memory_profiles directory."
-echo "To analyze the results:"
-echo "1. Go to https://pytorch.org/memory_viz"
-echo "2. Drag and drop the .pickle files onto the page"
-echo "3. Use the 'Detail' slider to adjust the level of detail"
-echo "4. Look for the 'Active Memory Timeline' to see memory usage over time" 
+# Full training step
+echo "Profiling full training step..."
+for seq_len in "${SEQ_LENGTHS[@]}"; do
+    echo "Running with sequence length: $seq_len"
+    python "$PYTHON_SCRIPT" \
+        --model-size 2.7B \
+        --batch-size $BATCH_SIZE \
+        --seq-len $seq_len \
+        --n-warmup $N_WARMUP \
+        --n-measure $N_MEASURE \
+        --run-optimizer \
+        --profile-memory
+done
+
+# --- Task (c): Profile with mixed precision ---
+echo "--- Running Task (c): Profile with mixed precision ---"
+
+# Forward pass only with mixed precision
+echo "Profiling forward pass only with mixed precision..."
+for seq_len in "${SEQ_LENGTHS[@]}"; do
+    echo "Running with sequence length: $seq_len"
+    python "$PYTHON_SCRIPT" \
+        --model-size 2.7B \
+        --batch-size $BATCH_SIZE \
+        --seq-len $seq_len \
+        --n-warmup $N_WARMUP \
+        --n-measure $N_MEASURE \
+        --forward-only \
+        --profile-memory \
+        --mixed-precision
+done
+
+# Full training step with mixed precision
+echo "Profiling full training step with mixed precision..."
+for seq_len in "${SEQ_LENGTHS[@]}"; do
+    echo "Running with sequence length: $seq_len"
+    python "$PYTHON_SCRIPT" \
+        --model-size 2.7B \
+        --batch-size $BATCH_SIZE \
+        --seq-len $seq_len \
+        --n-warmup $N_WARMUP \
+        --n-measure $N_MEASURE \
+        --run-optimizer \
+        --profile-memory \
+        --mixed-precision
+done
+
+echo "--- All Memory Profiling Runs Complete ---"
+echo "Memory snapshots are in the $OUTPUT_DIR directory."
+echo "View the results using PyTorch's memory visualization tool at https://pytorch.org/memory_viz"
+
+exit 0 

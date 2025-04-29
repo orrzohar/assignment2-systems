@@ -9,6 +9,7 @@ in both forward and backward passes, as well as in optimizer steps.
 import argparse
 import timeit
 from typing import Dict, Tuple, List, Optional
+import os
 
 import numpy as np
 import torch
@@ -58,6 +59,7 @@ def run_steps(
     do_backward: bool,
     run_optimizer: bool = False,
     optimizer: Optional[torch.optim.Optimizer] = None,
+    profile_memory: bool = False,
 ) -> Tuple[List[float], List[float], List[float]]:
     """
     Run n steps of forward/backward/optimizer and time each component.
@@ -70,6 +72,7 @@ def run_steps(
         do_backward: Whether to run backward pass
         run_optimizer: Whether to run optimizer step
         optimizer: Optimizer instance (required if run_optimizer is True)
+        profile_memory: Whether to profile memory usage
         
     Returns:
         Tuple of (forward times, backward times, optimizer times)
@@ -134,6 +137,8 @@ def benchmark(
     meas: int,
     forward_only: bool,
     run_optimizer: bool,
+    profile_memory: bool = False,
+    mixed_precision: bool = False,
 ) -> Dict[str, float]:
     """
     Benchmark a transformer model with the given configuration.
@@ -146,6 +151,8 @@ def benchmark(
         meas: Number of measurement steps
         forward_only: Whether to run only forward pass
         run_optimizer: Whether to run optimizer step
+        profile_memory: Whether to profile memory usage
+        mixed_precision: Whether to use mixed precision training
         
     Returns:
         Dictionary with timing results
@@ -180,10 +187,20 @@ def benchmark(
         # Generate random batch
         x, y = random_batch(batch, seq)
     
+    # Set up mixed precision if requested
+    if mixed_precision:
+        scaler = torch.cuda.amp.GradScaler()
+        print("Using mixed precision training")
+    
     # Warmup phase
     with nvtx.range("warmup_phase"):
         print(f"Running {warm} warmup steps...")
         _ = run_steps(model, x, y, warm, not forward_only, run_optimizer, optimizer)
+    
+    # Start memory profiling if requested
+    if profile_memory and DEVICE == "cuda":
+        print("Starting memory profiling...")
+        torch.cuda.memory._record_memory_history(max_entries=1000000)
     
     # Measurement phase
     with nvtx.range("measurement_phase"):
@@ -191,6 +208,15 @@ def benchmark(
         fwd_times, bwd_times, optim_times = run_steps(
             model, x, y, meas, not forward_only, run_optimizer, optimizer
         )
+    
+    # Stop memory profiling and save snapshot if requested
+    if profile_memory and DEVICE == "cuda":
+        print("Saving memory snapshot...")
+        os.makedirs("memory_snapshots", exist_ok=True)
+        snapshot_name = f"memory_snapshots/{cfg['d_model']}_{seq}_{'forward' if forward_only else 'full'}_{'mixed' if mixed_precision else 'fp32'}.pickle"
+        torch.cuda.memory._dump_snapshot(snapshot_name)
+        torch.cuda.memory._record_memory_history(enabled=None)
+        print(f"Memory snapshot saved to {snapshot_name}")
     
     # Calculate statistics
     results = {
@@ -228,6 +254,10 @@ def main() -> None:
                        help="Only profile forward pass")
     parser.add_argument("--run-optimizer", action="store_true",
                        help="Include optimizer step in profiling")
+    parser.add_argument("--profile-memory", action="store_true",
+                       help="Profile memory usage and save snapshot")
+    parser.add_argument("--mixed-precision", action="store_true",
+                       help="Use mixed precision training")
     args = parser.parse_args()
     
     # Determine which model sizes to profile
@@ -238,6 +268,8 @@ def main() -> None:
     print(f"Profiling with {'forward pass only' if args.forward_only else 'forward+backward'+(' and optimizer' if args.run_optimizer else '')}")
     print(f"Batch size: {args.batch_size}, Sequence length: {args.seq_len}")
     print(f"Warmup steps: {args.n_warmup}, Measurement steps: {args.n_measure}")
+    print(f"Memory profiling: {'enabled' if args.profile_memory else 'disabled'}")
+    print(f"Mixed precision: {'enabled' if args.mixed_precision else 'disabled'}")
     print(f"{'='*60}\n")
     
     # Run benchmarks for each model size
@@ -252,7 +284,9 @@ def main() -> None:
                 warm=args.n_warmup,
                 meas=args.n_measure,
                 forward_only=args.forward_only,
-                run_optimizer=args.run_optimizer
+                run_optimizer=args.run_optimizer,
+                profile_memory=args.profile_memory,
+                mixed_precision=args.mixed_precision
             )
             
             # Print results
@@ -275,8 +309,12 @@ def main() -> None:
                 print(f"Error: {str(e)}")
     
     print("\nProfiling complete.")
-    print("Analysis results are in the nsys profile output.")
-    print("View the results using NVIDIA Nsight Systems desktop application.")
+    if args.profile_memory:
+        print("Memory snapshots are in the memory_snapshots directory.")
+        print("View the results using PyTorch's memory visualization tool at https://pytorch.org/memory_viz")
+    else:
+        print("Analysis results are in the nsys profile output.")
+        print("View the results using NVIDIA Nsight Systems desktop application.")
 
 if __name__ == "__main__":
     main()
