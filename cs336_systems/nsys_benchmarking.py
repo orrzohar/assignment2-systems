@@ -10,6 +10,7 @@ import argparse
 import timeit
 from typing import Dict, Tuple, List, Optional
 import os
+from contextlib import nullcontext
 
 import numpy as np
 import torch
@@ -60,6 +61,7 @@ def run_steps(
     run_optimizer: bool = False,
     optimizer: Optional[torch.optim.Optimizer] = None,
     profile_memory: bool = False,
+    mixed_precision: bool = False,
 ) -> Tuple[List[float], List[float], List[float]]:
     """
     Run n steps of forward/backward/optimizer and time each component.
@@ -73,6 +75,7 @@ def run_steps(
         run_optimizer: Whether to run optimizer step
         optimizer: Optimizer instance (required if run_optimizer is True)
         profile_memory: Whether to profile memory usage
+        mixed_precision: Whether to use mixed precision training
         
     Returns:
         Tuple of (forward times, backward times, optimizer times)
@@ -83,6 +86,9 @@ def run_steps(
     if run_optimizer and optimizer is None:
         raise ValueError("Optimizer must be provided if run_optimizer is True")
     
+    # Create a gradient scaler for mixed precision training
+    scaler = torch.cuda.amp.GradScaler() if mixed_precision else None
+    
     for i in range(n):
         # Start step with NVTX range
         with nvtx.range(f"step_{i}"):
@@ -92,23 +98,31 @@ def run_steps(
             
             with nvtx.range("forward_pass"):
                 start_fwd = timeit.default_timer()
-                logits = model(x)
+                
+                # Use autocast for mixed precision forward pass
+                with torch.cuda.amp.autocast(enabled=mixed_precision):
+                    logits = model(x)
+                    loss = criterion(
+                        logits.view(-1, logits.size(-1)),
+                        y.view(-1)
+                    )
+                
                 if DEVICE == "cuda":
                     torch.cuda.synchronize()
                 end_fwd = timeit.default_timer()
                 fwd_times.append(end_fwd - start_fwd)
             
-            # Calculate loss
-            loss = criterion(
-                logits.view(-1, logits.size(-1)),
-                y.view(-1)
-            )
-            
             # Backward pass
             if do_backward:
                 with nvtx.range("backward_pass"):
                     start_bwd = timeit.default_timer()
-                    loss.backward()
+                    
+                    if mixed_precision:
+                        # Use scaled gradients for mixed precision
+                        scaler.scale(loss).backward()
+                    else:
+                        loss.backward()
+                    
                     if DEVICE == "cuda":
                         torch.cuda.synchronize()
                     end_bwd = timeit.default_timer()
@@ -118,8 +132,16 @@ def run_steps(
                 if run_optimizer and optimizer:
                     with nvtx.range("optimizer_step"):
                         start_optim = timeit.default_timer()
-                        optimizer.step()
+                        
+                        if mixed_precision:
+                            # Use scaler for mixed precision optimizer step
+                            scaler.step(optimizer)
+                            scaler.update()
+                        else:
+                            optimizer.step()
+                        
                         optimizer.zero_grad(set_to_none=True)
+                        
                         if DEVICE == "cuda":
                             torch.cuda.synchronize()
                         end_optim = timeit.default_timer()
@@ -193,15 +215,13 @@ def benchmark(
         # Generate random batch
         x, y = random_batch(batch, seq)
     
-    # Set up mixed precision if requested
-    if mixed_precision:
-        scaler = torch.cuda.amp.GradScaler()
-        print("Using mixed precision training")
-    
     # Warmup phase
     with nvtx.range("warmup_phase"):
         print(f"Running {warm} warmup steps...")
-        _ = run_steps(model, x, y, warm, not forward_only, run_optimizer, optimizer)
+        _ = run_steps(
+            model, x, y, warm, not forward_only, run_optimizer, optimizer,
+            mixed_precision=mixed_precision
+        )
     
     # Start memory profiling if requested
     if profile_memory and DEVICE == "cuda":
@@ -212,7 +232,8 @@ def benchmark(
     with nvtx.range("measurement_phase"):
         print(f"Running {meas} measurement steps...")
         fwd_times, bwd_times, optim_times = run_steps(
-            model, x, y, meas, not forward_only, run_optimizer, optimizer
+            model, x, y, meas, not forward_only, run_optimizer, optimizer,
+            profile_memory=profile_memory, mixed_precision=mixed_precision
         )
     
     # Stop memory profiling and save snapshot if requested
