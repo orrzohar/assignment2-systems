@@ -20,7 +20,10 @@ class ToyModel(nn.Module):
         return x
 
 def print_tensor_info(name, tensor):
-    print(f"{name}: dtype={tensor.dtype}, shape={tensor.shape}")
+    if tensor is None:
+        print(f"{name}: None")
+    else:
+        print(f"{name}: dtype={tensor.dtype}, shape={tensor.shape}")
 
 def benchmark_mixed_precision(precision: str, num_steps: int = 100, warmup_steps: int = 10):
     # Create model and move to GPU
@@ -92,6 +95,12 @@ def benchmark_mixed_precision(precision: str, num_steps: int = 100, warmup_steps
     print(f"\nBenchmark results (using {precision}):")
     print(f"Average forward time: {avg_forward*1000:.3f}ms")
     print(f"Average backward time: {avg_backward*1000:.3f}ms")
+    
+    # Do one final backward pass to see gradient types
+    with autocast_context:
+        logits = model(x)
+        loss = criterion(logits, target)
+        loss.backward()
     
     # Print gradient info after final backward pass
     print("\nAfter backward pass:")
